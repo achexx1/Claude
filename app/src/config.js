@@ -15,7 +15,8 @@ export function loadConfig(env = process.env) {
     // Попыток входа/регистрации с одного IP за 15 минут
     authRateLimit: Number(env.AGORA_AUTH_LIMIT || 20),
     gateway: {
-      timeoutMs: Number(env.AGORA_TIMEOUT_MS || 30_000),
+      // Агентам на языковых моделях нужно время: 60 секунд на ответ
+      timeoutMs: Number(env.AGORA_TIMEOUT_MS || 60_000),
       maxResponseBytes: 256 * 1024,
       maxInputChars: 10_000,
       // Лимиты вызовов на одного покупателя в час

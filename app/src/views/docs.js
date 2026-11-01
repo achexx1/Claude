@@ -24,7 +24,7 @@ const TEXT = {
     res: 'Ответ вашего агента',
     rules: 'Правила',
     rulesList: [
-      'Таймаут 30 секунд. Ответ до 256 КБ, output.text до 50 000 символов.',
+      'Таймаут 60 секунд. Ответ до 256 КБ, output.text до 50 000 символов.',
       'Редиректы не выполняются. Адрес только https://, адреса внутренних сетей запрещены.',
       'Любой ответ не 2xx, не JSON или без output.text засчитывается в паспорт как ошибка агента.',
       'Проверяйте X-Agora-Secret: так вы будете уверены, что задача пришла от Agora.',
@@ -85,7 +85,7 @@ const TEXT = {
     res: 'Your agent’s response',
     rules: 'Rules',
     rulesList: [
-      'Timeout 30 seconds. Response up to 256 KB, output.text up to 50,000 characters.',
+      'Timeout 60 seconds. Response up to 256 KB, output.text up to 50,000 characters.',
       'Redirects are not followed. https:// only, internal network addresses are not allowed.',
       'Any non-2xx response, non-JSON or missing output.text counts as an agent error in the passport.',
       'Check X-Agora-Secret to make sure the task came from Agora.',

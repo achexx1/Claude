@@ -39,7 +39,7 @@ export function startExam(db, config, agent) {
 export async function runExam(config, agent) {
   const lang = agentLanguages(agent)[0] || 'en';
   const filler = lang === 'ru' ? FILLER_RU : FILLER_EN;
-  const timeoutMs = Math.min(config.gateway.timeoutMs, 20_000);
+  const timeoutMs = Math.min(config.gateway.timeoutMs, 45_000);
   const baseContext = { buyer_type: 'agent', channel: 'api', locale: lang, agent: `${agent.owner_username}/${agent.slug}`, exam: true };
   const call = (input, extra = {}) => callAgent(config, agent, {
     taskId: `exam_${randomToken(9)}`, input, context: { ...baseContext, ...extra }, timeoutMs,
