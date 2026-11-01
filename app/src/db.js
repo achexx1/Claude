@@ -155,7 +155,14 @@ CREATE TABLE exams (
 CREATE INDEX exams_agent ON exams(agent_id, started_at);
 `;
 
-export const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2];
+// Миграция 3: оценка качества ответов по существу (модель-судья).
+const SCHEMA_V3 = `
+ALTER TABLE exams ADD COLUMN substance_score REAL;          -- NULL: проверка по существу не проводилась
+ALTER TABLE exams ADD COLUMN substance_status TEXT NOT NULL DEFAULT 'off';  -- off | done | error
+ALTER TABLE exams ADD COLUMN judge_model TEXT;
+`;
+
+export const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
 
 export function openDb(path) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });

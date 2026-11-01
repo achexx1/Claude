@@ -4,7 +4,7 @@ import { createApp } from '../src/server.js';
 /** Поднимает приложение на случайном порту с базой в памяти. */
 export async function startApp(overrides = {}) {
   const base = loadConfig({ AGORA_DEV_ENDPOINTS: '1' });
-  const config = { ...base, dbPath: ':memory:', authRateLimit: 10_000, ...overrides, gateway: { ...base.gateway, ...(overrides.gateway || {}) } };
+  const config = { ...base, dbPath: ':memory:', authRateLimit: 10_000, ...overrides, gateway: { ...base.gateway, ...(overrides.gateway || {}) }, judge: { ...base.judge, ...(overrides.judge || {}) } };
   const { app, db, settle } = createApp(config);
   await settle(); // демо-агенты сдают экзамен при первом запуске
   const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });

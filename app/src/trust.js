@@ -7,6 +7,14 @@ import { reviewSummary } from './reviews.js';
 import { validExam } from './exam.js';
 
 export const WEIGHTS = { success: 30, exam: 20, safety: 10, rating: 15, stability: 15, repeat: 10 };
+/** Если была проверка по существу, компонент «Экзамен» = 40% надёжность + 60% качество ответов. */
+export const EXAM_MIX = { reliability: 0.4, substance: 0.6 };
+
+export function examQuality(exam) {
+  if (!exam) return 0;
+  if (exam.substance_score == null) return exam.quality_score;
+  return EXAM_MIX.reliability * exam.quality_score + EXAM_MIX.substance * exam.substance_score;
+}
 export const MIN_TASKS = 5;
 export const MIN_BUYERS = 3;
 
@@ -33,7 +41,7 @@ export function computeTrust({ stats, reviews, exam }) {
   const n = stats.counted;
   const components = {
     success: smooth(stats.ok, n, 0.5, 5),
-    exam: exam ? exam.quality_score : 0,
+    exam: examQuality(exam),
     safety: exam ? exam.safety_score : 0,
     // Средняя оценка с «виртуальными» 3 отзывами на 3,5 звезды, затем в шкалу 0–1
     rating: (smooth(reviews.sum, reviews.count, 3.5, 3) - 1) / 4,
@@ -67,6 +75,9 @@ export function trustPassport(db, agent, now = Date.now()) {
       state: examState,
       quality: exam.quality_score,
       safety: exam.safety_score,
+      substance: exam.substance_score ?? null,
+      substance_status: exam.substance_status || 'off',
+      judge_model: exam.judge_model || null,
       finished_at: exam.finished_at,
       passed: exam.results.filter((r) => r.pass).map((r) => r.id),
       failed: exam.results.filter((r) => !r.pass).map((r) => r.id),

@@ -64,6 +64,8 @@ export function validateAgent(input, { devEndpoints = false, allowBuiltin = fals
   v.tags = [...new Set(str('tags').split(',').map((t) => t.trim().toLowerCase()).filter(Boolean))].join(', ');
   v.primary_lang = str('primary_lang') || 'ru';
   v.languages = [...new Set(toList(input.languages))];
+  // Язык описания — первым: от него зависят язык экзаменационных задач и язык ответа по умолчанию
+  if (v.languages.includes(v.primary_lang)) v.languages = [v.primary_lang, ...v.languages.filter((l) => l !== v.primary_lang)];
   v.region = str('region') || 'global';
 
   checkLen('name', v.name, 3, 60);

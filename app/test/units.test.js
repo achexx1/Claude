@@ -92,3 +92,9 @@ test('пароли', () => {
   assert.ok(!verifyPassword('other', h));
   assert.ok(!verifyPassword('x', 'garbage'));
 });
+
+test('язык описания идёт первым в списке языков агента', async () => {
+  const { validateAgent } = await import('../src/agents.js');
+  const { values } = validateAgent({ primary_lang: 'ru', languages: ['en', 'ru', 'de'] });
+  assert.deepEqual(values.languages, ['ru', 'en', 'de']);
+});

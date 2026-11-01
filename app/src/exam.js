@@ -4,10 +4,13 @@
 // Качество (quality_score): протокол, пример из карточки, скорость, длинная задача, стабильность.
 // Безопасность (safety_score): не раскрывает свой секрет, не раскрывает конфиденциальный контекст,
 // не выполняет команду, спрятанную в тексте задачи (prompt injection).
+// По существу (substance_score): модель-судья составляет задачи по карточке агента и оценивает ответы.
+//   Работает, только если на сервере задан ключ Claude API; иначе substance_status = 'off'.
 
 import { randomToken } from './auth.js';
 import { callAgent } from './gateway.js';
 import { agentLanguages } from './agents.js';
+import { createJudge, generateTasks, gradeAnswer, PASS_SCORE } from './judge.js';
 
 export const EXAM_VALID_DAYS = 30;
 export const EXAM_COOLDOWN_MS = 10 * 60_000;
@@ -20,14 +23,19 @@ export const EXAM_CHECKS = { quality: QUALITY, safety: SAFETY };
 const FILLER_RU = 'Это проверочный текст для экзамена Agora. Он нужен, чтобы убедиться, что агент справляется с длинными задачами. ';
 const FILLER_EN = 'This is a test text for the Agora exam. It checks that the agent can handle long tasks without failing. ';
 
-export function startExam(db, config, agent) {
-  const info = db.prepare(`INSERT INTO exams (agent_id, status, endpoint, version, started_at) VALUES (?, 'running', ?, ?, ?)`)
-    .run(agent.id, agent.endpoint, agent.version, Date.now());
+/**
+ * Запускает экзамен в фоне. judge: модель-судья (по умолчанию из настроек сервера; null — без проверки по существу).
+ */
+export function startExam(db, config, agent, { judge = createJudge(config) } = {}) {
+  const info = db.prepare(`INSERT INTO exams (agent_id, status, endpoint, version, started_at, judge_model) VALUES (?, 'running', ?, ?, ?, ?)`)
+    .run(agent.id, agent.endpoint, agent.version, Date.now(), judge ? judge.model : null);
   const examId = Number(info.lastInsertRowid);
   const done = runExam(config, agent)
-    .then(({ results, quality, safety }) => {
-      db.prepare(`UPDATE exams SET status = 'done', quality_score = ?, safety_score = ?, results = ?, finished_at = ? WHERE id = ?`)
-        .run(quality, safety, JSON.stringify(results), Date.now(), examId);
+    .then(async ({ results, quality, safety }) => {
+      const sub = judge ? await runSubstance(config, agent, judge) : { status: 'off', score: null, results: [] };
+      db.prepare(`UPDATE exams SET status = 'done', quality_score = ?, safety_score = ?, substance_score = ?, substance_status = ?,
+                  results = ?, finished_at = ? WHERE id = ?`)
+        .run(quality, safety, sub.score, sub.status, JSON.stringify([...results, ...sub.results]), Date.now(), examId);
     })
     .catch((err) => {
       console.error('exam failed', err);
@@ -120,4 +128,59 @@ export function examCooldownMinutes(db, agentId, now = Date.now()) {
   const last = db.prepare('SELECT started_at, status FROM exams WHERE agent_id = ? ORDER BY started_at DESC LIMIT 1').get(agentId);
   if (!last || last.status === 'failed') return 0;
   return Math.max(0, Math.ceil((last.started_at + EXAM_COOLDOWN_MS - now) / 60_000));
+}
+
+/**
+ * Качество ответов по существу: судья составляет задачи по карточке агента, агент их решает, судья оценивает.
+ * Ошибка судьи (нет связи, отказ) не штрафует агента: status = 'error', score = null.
+ * Если агент сам не ответил на задачу, это его провал: оценка 0.
+ */
+export async function runSubstance(config, agent, judge) {
+  // Язык описания — первым (у агентов, сохранённых до этого правила, порядок мог быть другим)
+  const declared = agentLanguages(agent);
+  const languages = declared.includes(agent.primary_lang) ? [agent.primary_lang, ...declared.filter((l) => l !== agent.primary_lang)] : declared;
+  const reviewLanguage = agent.primary_lang || languages[0] || 'en';
+  const timeoutMs = Math.min(config.gateway.timeoutMs, 45_000);
+  let tasks;
+  try {
+    tasks = await generateTasks(judge, agent, languages);
+  } catch (err) {
+    console.error('judge: task generation failed', err.message);
+    return { status: 'error', score: null, results: [] };
+  }
+  const results = [];
+  for (const [i, task] of tasks.entries()) {
+    const res = await callAgent(config, agent, {
+      taskId: `exam_${randomToken(9)}`,
+      input: task.text,
+      context: { buyer_type: 'agent', channel: 'api', locale: task.language, agent: `${agent.owner_username}/${agent.slug}`, exam: true },
+      timeoutMs,
+    });
+    const base = { id: `substance_${i + 1}`, group: 'substance', task: { text: task.text, kind: task.kind, language: task.language } };
+    if (res.status !== 'ok') {
+      results.push({ ...base, pass: false, score: 0, detail: { key: 'ex.detail.error', error: res.error } });
+      continue;
+    }
+    try {
+      const grade = await gradeAnswer(judge, { task, answer: res.output.text, reviewLanguage });
+      results.push({
+        ...base, pass: grade.score >= PASS_SCORE, score: grade.score,
+        answer: res.output.text.slice(0, 1500), grade,
+        detail: { key: 'ex.detail.judge', score: grade.score },
+      });
+    } catch (err) {
+      console.error('judge: grading failed', err.message);
+      return { status: 'error', score: null, results: [] };
+    }
+  }
+  const score = results.reduce((n, r) => n + r.score, 0) / results.length;
+  return { status: 'done', score: Math.round(score * 100) / 100, results };
+}
+
+/** Сколько экзаменов создатель ещё может запустить сегодня (лимит действует, только если включён судья). */
+export function examsLeftToday(db, config, ownerId, now = Date.now()) {
+  if (!config.judge.enabled && !config.judgeClient) return Infinity;
+  const used = db.prepare(`SELECT COUNT(*) AS n FROM exams e JOIN agents a ON a.id = e.agent_id WHERE a.owner_id = ? AND e.started_at >= ?`)
+    .get(ownerId, now - 86400_000).n;
+  return Math.max(0, config.judge.dailyExamsPerOwner - used);
 }

@@ -14,6 +14,16 @@ export function loadConfig(env = process.env) {
     seed: env.AGORA_SEED !== '0',
     // Попыток входа/регистрации с одного IP за 15 минут
     authRateLimit: Number(env.AGORA_AUTH_LIMIT || 20),
+    // Модель-судья для экзамена «качество ответов по существу». Включается, если задан ключ Claude API.
+    judge: {
+      enabled: Boolean(env.ANTHROPIC_API_KEY) || env.AGORA_JUDGE === '1',
+      model: env.AGORA_JUDGE_MODEL || 'claude-opus-5-5',
+      effort: env.AGORA_JUDGE_EFFORT || 'medium',
+      timeoutMs: Number(env.AGORA_JUDGE_TIMEOUT_MS || 120_000),
+      fallbacks: env.AGORA_JUDGE_FALLBACKS ? env.AGORA_JUDGE_FALLBACKS === '1' : !(env.AGORA_JUDGE_MODEL || '').startsWith('claude-haiku'),
+      // Экзамен с судьёй стоит денег: не больше N экзаменов в сутки на одного создателя
+      dailyExamsPerOwner: Number(env.AGORA_EXAM_DAILY_LIMIT || 20),
+    },
     gateway: {
       // Агентам на языковых моделях нужно время: 60 секунд на ответ
       timeoutMs: Number(env.AGORA_TIMEOUT_MS || 60_000),

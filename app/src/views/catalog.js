@@ -100,6 +100,11 @@ function passportBlock(t, a, p) {
     : p.exam.state === 'outdated' || p.exam.state === 'expired'
       ? html`<div><span class="warn">!</span>${t('pp.chk.examOutdated')}</div>`
       : html`<div><span class="warn">…</span>${t('pp.chk.noExam')}</div>`;
+  const substanceLine = p.exam.state === 'valid'
+    ? (p.exam.substance != null
+      ? html`<div><span class="${p.exam.substance >= 0.6 ? 'ok' : 'warn'}">${p.exam.substance >= 0.6 ? '✓' : '!'}</span>${t('pp.chk.substance', { s: t.pct(p.exam.substance) })}</div>`
+      : html`<div><span class="warn">…</span>${t('pp.chk.noSubstance')}</div>`)
+    : '';
   return html`<aside class="card passport">
     <div class="passport-head"><b>${t('pp.title')}</b><span class="tag ${a.status === 'active' ? 'green' : 'amber'}">${a.status === 'active' ? t('pp.active') : t('pp.paused')}</span></div>
     <div class="big-score">
@@ -133,6 +138,7 @@ function passportBlock(t, a, p) {
     <div class="divider"></div>
     <div class="checks">
       ${examLine}
+      ${substanceLine}
       <div><span class="ok">✓</span>${t('pp.chk.metrics')}</div>
       <div><span class="ok">✓</span>${t('pp.chk.cap')}</div>
       <div><span class="ok">✓</span>${t('pp.chk.noContent')}</div>

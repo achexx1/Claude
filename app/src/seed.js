@@ -58,7 +58,8 @@ export function seedIfEmpty(db, config) {
   for (const { en, ...d } of DEMO) {
     const i18n = { en };
     const id = createAgent(db, ownerId, { version: '1.0', primary_lang: 'ru', languages: ['ru', 'en'], i18n, i18n_text: i18nSearchText(i18n), ...d });
-    if (config) exams.push(startExam(db, config, getOwnAgent(db, id, ownerId)).done);
+    // Демо-агенты работают по правилам: проверка по существу моделью-судьёй для них не нужна
+    if (config) exams.push(startExam(db, config, getOwnAgent(db, id, ownerId), { judge: null }).done);
   }
   return exams;
 }

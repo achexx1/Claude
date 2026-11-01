@@ -93,10 +93,39 @@ function detailText(t, d) {
   if (!d) return '';
   if (d.key === 'ex.detail.latency') return t(d.key, { time: t.ms(d.ms) });
   if (d.key === 'ex.detail.error') return t(d.key, { error: describeTaskError(t, d.error) });
+  if (d.key === 'ex.detail.judge') return t(d.key, { score: t.pct(d.score) });
   return t(d.key);
 }
 
-export function examPage({ t, user, csrf, agent, latest, validity, cooldown, path }) {
+function substanceSection(t, latest, judgeEnabled) {
+  const items = latest.results.filter((r) => r.group === 'substance');
+  const status = latest.substance_status || 'off';
+  let body;
+  if (status === 'done') {
+    body = html`<p class="small muted">${t('ex.substanceIntro')}</p>
+      <div class="exam">${items.map((r) => html`<details class="exam-task">
+        <summary class="exam-row">
+          <span class="${r.pass ? 'ok' : 'danger'}">${r.pass ? '✓' : '✗'}</span>
+          <span>${t('ex.task')} ${r.id.split('_')[1]} · <span class="muted small">${t(`ex.kind.${r.task.kind}`)} · ${t('ex.lang', { lang: t.lang(r.task.language) })}</span>
+            ${r.grade?.summary ? html`<div class="small muted">${r.grade.summary}</div>` : r.detail ? html`<div class="small muted">${detailText(t, r.detail)}</div>` : ''}</span>
+          <span class="small ${r.pass ? 'ok' : 'danger'}">${t.pct(r.score)}</span>
+        </summary>
+        <div class="exam-task-body">
+          <div class="small muted">${t('ex.task')}</div><div class="msg user pre-wrap">${r.task.text}</div>
+          ${r.answer ? html`<div class="small muted mt-s">${t('ex.answer')}</div><div class="msg agent pre-wrap">${r.answer}</div>` : ''}
+          ${r.grade ? html`<div class="small muted mt-s">${t('ex.criteria')}</div>
+            <ul class="criteria">${r.grade.criteria.map((c) => html`<li><span class="${c.met ? 'ok' : 'danger'}">${c.met ? '✓' : '✗'}</span> ${c.criterion}<div class="small muted">${c.comment}</div></li>`)}</ul>` : ''}
+        </div>
+      </details>`)}</div>`;
+  } else if (status === 'error') {
+    body = html`<div class="alert warn">${t('ex.substanceError')}</div>`;
+  } else {
+    body = html`<p class="small muted">${judgeEnabled ? t('ex.substanceNotRun') : t('ex.substanceOff')}</p>`;
+  }
+  return html`<h3 class="mt">${t('ex.group.substance')}</h3>${body}`;
+}
+
+export function examPage({ t, user, csrf, agent, latest, validity, cooldown, path, judgeEnabled, examsLeft, dailyLimit, limitHit }) {
   const byId = Object.fromEntries((latest?.results || []).map((r) => [r.id, r]));
   const group = (name) => html`<h3 class="mt">${t(`ex.group.${name}`)}</h3><div class="exam">
     ${EXAM_CHECKS[name].map((id) => {
@@ -120,14 +149,17 @@ export function examPage({ t, user, csrf, agent, latest, validity, cooldown, pat
     ${!running && validity === 'outdated' ? html`<div class="alert warn mt">${t('ex.outdated')}</div>` : ''}
     ${!running && validity === 'expired' ? html`<div class="alert warn mt">${t('ex.expired')}</div>` : ''}
     ${latest?.status === 'done' ? html`<div class="kpis mt exam-kpis">
+      <div class="card kpi"><span>${t('ex.substance')}</span><b>${t.pct(latest.substance_score)}</b></div>
       <div class="card kpi"><span>${t('ex.quality')}</span><b>${t.pct(latest.quality_score)}</b></div>
       <div class="card kpi"><span>${t('ex.safety')}</span><b>${t.pct(latest.safety_score)}</b></div>
       <div class="card kpi"><span>${t('ex.finished', { date: '' })}</span><b class="small">${t.dateTime(latest.finished_at)}</b></div>
     </div>` : ''}
-    ${!latest ? html`<p class="mt">${t('ex.none')}</p>` : ''}
-    ${latest?.status === 'done' ? html`${group('quality')}${group('safety')}` : ''}
+    ${limitHit ? html`<div class="alert bad mt">${t('ex.dailyLimit', { limit: dailyLimit })}</div>` : ''}
+    ${!latest ? html`<p class="mt">${t('ex.none')}</p>${judgeEnabled ? '' : html`<p class="small muted">${t('ex.substanceOff')}</p>`}` : ''}
+    ${latest?.status === 'done' ? html`${substanceSection(t, latest, judgeEnabled)}${group('quality')}${group('safety')}` : ''}
     <div class="row space mt">
-      ${cooldown > 0 && !running ? html`<span class="small muted">${t('ex.cooldown', { min: cooldown })}</span>` : html`<span></span>`}
+      <span class="small muted">${cooldown > 0 && !running ? t('ex.cooldown', { min: cooldown }) : ''}
+        ${Number.isFinite(examsLeft) ? html`<br>${t('ex.examsLeft', { n: examsLeft })}` : ''}</span>
       ${running ? '' : html`<form method="post" action="/me/agents/${agent.id}/exam">${csrfField(csrf)}
         <button class="btn btn-primary" ${cooldown > 0 ? 'disabled' : ''}>${latest ? t('ex.rerun') : t('ex.run')}</button></form>`}
     </div>

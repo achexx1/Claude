@@ -14,7 +14,7 @@ import { trustPassport } from '../trust.js';
 import { listCatalog } from '../catalog.js';
 import { invokeAgent, HttpError } from '../gateway.js';
 import { reviewEligibility, validateReview, upsertReview, getOwnReview, listReviews } from '../reviews.js';
-import { startExam, latestExam, validExam, examCooldownMinutes } from '../exam.js';
+import { startExam, latestExam, validExam, examCooldownMinutes, examsLeftToday } from '../exam.js';
 import { isUiLocale, LANG_COOKIE, AGENT_LANGUAGES } from '../i18n/index.js';
 import { homePage, agentPage } from '../views/catalog.js';
 import { loginPage, registerPage, agentFormPage } from '../views/forms.js';
@@ -248,6 +248,9 @@ export function webRouter(db, config, pending) {
     send(res, examPage({
       ...ctx(req), agent: localizeAgent(a, req.t.locale), latest: latestExam(db, a.id),
       validity: validExam(db, a).state, cooldown: examCooldownMinutes(db, a.id),
+      judgeEnabled: Boolean(config.judge.enabled || config.judgeClient),
+      examsLeft: examsLeftToday(db, config, req.user.id), dailyLimit: config.judge.dailyExamsPerOwner,
+      limitHit: req.query.limit === '1',
     }));
   });
 
@@ -255,6 +258,7 @@ export function webRouter(db, config, pending) {
     const a = ownAgent(req);
     if (!a) return notFound(req, res);
     const running = latestExam(db, a.id)?.status === 'running';
+    if (examsLeftToday(db, config, req.user.id) <= 0) return res.redirect(303, `/me/agents/${a.id}/exam?limit=1`);
     if (!running && examCooldownMinutes(db, a.id) === 0) track(startExam(db, config, a).done);
     res.redirect(303, `/me/agents/${a.id}/exam`);
   });
