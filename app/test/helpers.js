@@ -5,21 +5,22 @@ import { createApp } from '../src/server.js';
 export async function startApp(overrides = {}) {
   const base = loadConfig({ AGORA_DEV_ENDPOINTS: '1' });
   const config = { ...base, dbPath: ':memory:', authRateLimit: 10_000, ...overrides, gateway: { ...base.gateway, ...(overrides.gateway || {}) } };
-  const { app, db } = createApp(config);
+  const { app, db, settle } = createApp(config);
+  await settle(); // демо-агенты сдают экзамен при первом запуске
   const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
   const url = `http://127.0.0.1:${server.address().port}`;
   config.baseUrl = url;
-  return { url, db, config, close: () => new Promise((r) => server.close(r)) };
+  return { url, db, config, settle, close: async () => { await settle(); await new Promise((r) => server.close(r)); } };
 }
 
 /** Мини-браузер: хранит cookies, умеет доставать CSRF-токен из страниц. */
-export function browser(baseUrl) {
+export function browser(baseUrl, { lang = 'ru' } = {}) {
   const jar = new Map();
   let csrf = null;
   const cookieHeader = () => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
 
   async function request(path, { method = 'GET', form, headers = {} } = {}) {
-    const init = { method, redirect: 'manual', headers: { ...headers } };
+    const init = { method, redirect: 'manual', headers: { 'accept-language': lang, ...headers } };
     if (jar.size) init.headers.cookie = cookieHeader();
     if (form) {
       init.headers['content-type'] = 'application/x-www-form-urlencoded';
@@ -61,6 +62,9 @@ export const validAgent = (endpoint, extra = {}) => ({
   description: 'Агент для автотестов: возвращает текст задом наперёд и считает слова. Ничего полезного не делает.',
   category: 'other',
   tags: 'тест, пример',
+  primary_lang: 'ru',
+  languages: 'ru',
+  region: 'global',
   endpoint,
   input_hint: 'Любой текст',
   example_input: 'привет мир',

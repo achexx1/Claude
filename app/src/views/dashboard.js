@@ -1,85 +1,137 @@
-import { html, fmtNum, plural } from '../html.js';
+import { html } from '../html.js';
 import { agentPath } from '../agents.js';
-import { pct, ms } from '../stats.js';
+import { EXAM_CHECKS } from '../exam.js';
+import { describeTaskError } from '../gateway.js';
 import { layout, csrfField } from './layout.js';
+import { trustRing } from './catalog.js';
 
-const NOTICES = {
-  published: 'Агент опубликован и уже виден в каталоге. Проверьте его кнопкой «Попробовать».',
-  saved: 'Изменения сохранены.',
-  paused: 'Агент на паузе: в каталоге он скрыт, задачи не принимаются.',
-  resumed: 'Агент снова принимает задачи.',
-  deleted: 'Агент удалён.',
-  secret: 'Секрет агента обновлён. Не забудьте заменить его у себя на сервере.',
-  key_revoked: 'API-ключ отозван.',
-};
+const NOTICES = ['published', 'saved', 'paused', 'resumed', 'deleted', 'secret', 'key_revoked', 'exam_started'];
 
-function chart(days) {
+function chart(t, days) {
   const max = Math.max(1, ...days.map((d) => d.n));
   const w = 100 / days.length;
-  const fmt = (t) => new Date(t).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
-  return html`<svg class="chart-svg" viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label="Задачи по дням">
+  return html`<svg class="chart-svg" viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label="${t('d.chartAria')}">
     <defs><linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c5cff"/><stop offset="1" stop-color="#7c5cff" stop-opacity=".25"/></linearGradient></defs>
     ${days.map((d, i) => {
       const h = d.n ? Math.max(1.5, (d.n / max) * 38) : 0.6;
-      return html`<rect x="${(i * w + w * 0.15).toFixed(2)}" y="${(40 - h).toFixed(2)}" width="${(w * 0.7).toFixed(2)}" height="${h.toFixed(2)}" rx="0.6"><title>${fmt(d.day)}: ${d.n}</title></rect>`;
+      return html`<rect x="${(i * w + w * 0.15).toFixed(2)}" y="${(40 - h).toFixed(2)}" width="${(w * 0.7).toFixed(2)}" height="${h.toFixed(2)}" rx="0.6"><title>${t.dateShort(d.day)}: ${d.n}</title></rect>`;
     })}
-  </svg><div class="chart-labels"><span>${fmt(days[0].day)}</span><span>сегодня</span></div>`;
+  </svg><div class="chart-labels"><span>${t.dateShort(days[0].day)}</span><span>${t('d.today')}</span></div>`;
 }
 
-export function dashboardPage({ user, csrf, agents, totals, days, keys, notice, newKey }) {
+function examCell(t, x) {
+  const ex = x.latest;
+  let label;
+  if (ex?.status === 'running') label = html`<span class="tag amber">${t('d.examRunning')}</span>`;
+  else if (x.p.exam.state === 'valid') label = html`<span class="tag green">${t.pct(x.p.exam.quality)} · ${t.pct(x.p.exam.safety)}</span>`;
+  else if (x.p.exam.state === 'outdated' || x.p.exam.state === 'expired') label = html`<span class="tag amber">${t('d.examOutdated')}</span>`;
+  else label = html`<span class="tag">${t('d.examNone')}</span>`;
+  return html`${label} <a class="btn btn-sm" href="/me/agents/${x.a.id}/exam">${t('d.examOpen')}</a>`;
+}
+
+export function dashboardPage({ t, user, csrf, agents, totals, days, keys, notice, newKey, path }) {
   const activeCount = agents.filter((x) => x.a.status === 'active').length;
   return layout({
-    title: 'Кабинет', user, csrf, active: 'me',
+    t, title: t('d.title'), user, csrf, active: 'me', path,
     body: html`<main class="container page">
   <div class="row space mb">
-    <div><h1 class="section-title">Привет, ${user.display_name} 👋</h1><p class="muted">Ваши агенты за последние 30 дней</p></div>
-    <a href="/publish" class="btn btn-primary">+ Опубликовать агента</a>
+    <div><h1 class="section-title">${t('d.hello', { name: user.display_name })}</h1><p class="muted">${t('d.sub')}</p></div>
+    <a href="/publish" class="btn btn-primary">+ ${t('nav.publish')}</a>
   </div>
-  ${notice && NOTICES[notice] ? html`<div class="alert ok">${NOTICES[notice]}</div>` : ''}
-  ${newKey ? html`<div class="alert warn"><b>Новый API-ключ.</b> Скопируйте его сейчас: больше мы его не покажем.<div class="secret mt-s">${newKey}</div></div>` : ''}
+  ${NOTICES.includes(notice) ? html`<div class="alert ok">${t(`d.n.${notice}`)}</div>` : ''}
+  ${newKey ? html`<div class="alert warn"><b>${t('d.newKey')}</b> ${t('d.newKeyHint')}<div class="secret mt-s">${newKey}</div></div>` : ''}
 
   <div class="kpis">
-    <div class="card kpi"><span>Агентов</span><b>${agents.length}</b><span class="muted small">${activeCount} ${plural(activeCount, 'активен', 'активны', 'активны')}</span></div>
-    <div class="card kpi"><span>Задач за 30 дней</span><b>${fmtNum(totals.tasks)}</b><span class="muted small">всего: ${fmtNum(totals.all)}</span></div>
-    <div class="card kpi"><span>Успешно</span><b>${pct(totals.okRate)}</b><span class="muted small">доля задач без ошибок</span></div>
-    <div class="card kpi"><span>От других агентов</span><b>${pct(totals.agentShare)}</b><span class="muted small">вызовы через API</span></div>
+    <div class="card kpi"><span>${t('d.k.agents')}</span><b>${agents.length}</b><span class="muted small">${t('d.k.active', { n: activeCount })}</span></div>
+    <div class="card kpi"><span>${t('d.k.tasks30')}</span><b>${t.num(totals.tasks)}</b><span class="muted small">${t('d.k.all', { n: totals.all })}</span></div>
+    <div class="card kpi"><span>${t('d.k.success')}</span><b>${t.pct(totals.okRate)}</b><span class="muted small">${t('d.k.successHint')}</span></div>
+    <div class="card kpi"><span>${t('d.k.fromAgents')}</span><b>${t.pct(totals.agentShare)}</b><span class="muted small">${t('d.k.fromAgentsHint')}</span></div>
   </div>
 
-  <div class="card mb form-card"><div class="row space"><b>Задачи по дням</b><span class="tag">14 дней</span></div>${chart(days)}</div>
+  <div class="card mb form-card"><div class="row space"><b>${t('d.chart')}</b><span class="tag">${t('d.days14')}</span></div>${chart(t, days)}</div>
 
-  <h2 class="section-title">Мои агенты</h2>
+  <h2 class="section-title">${t('d.myAgents')}</h2>
   ${agents.length ? html`<div class="card table-card mb"><table class="list">
-    <thead><tr><th>Агент</th><th>Статус</th><th>Задач 30 дн.</th><th>Успешно</th><th>Медиана</th><th></th></tr></thead>
-    <tbody>${agents.map(({ a, s }) => html`<tr>
-      <td><a href="${agentPath(a)}"><b>${a.icon} ${a.name}</b></a><div class="small muted">${agentPath(a)}</div>
-        <details class="mt-s"><summary>Секрет и эндпоинт</summary>
-          <div class="small muted mt-s">Эндпоинт: ${a.endpoint}</div>
-          <div class="small muted mt-s">Agora присылает секрет в заголовке <code>X-Agora-Secret</code>. Проверяйте его, чтобы принимать задачи только от Agora:</div>
-          <div class="secret mt-s">${a.secret}</div></details></td>
-      <td>${a.status === 'active' ? html`<span class="tag green">активен</span>` : html`<span class="tag amber">пауза</span>`}</td>
-      <td>${fmtNum(s.total30)}</td><td>${pct(s.successRate)}</td><td>${ms(s.medianLatency)}</td>
+    <thead><tr><th>${t('d.th.agent')}</th><th>${t('d.th.trust')}</th><th>${t('d.th.status')}</th><th>${t('d.th.tasks')}</th><th>${t('d.th.exam')}</th><th></th></tr></thead>
+    <tbody>${agents.map((x) => html`<tr>
+      <td><a href="${agentPath(x.a)}"><b>${x.a.icon} ${x.a.name}</b></a><div class="small muted">${agentPath(x.a)}</div>
+        <details class="mt-s"><summary>${t('d.secret')}</summary>
+          <div class="small muted mt-s">${t('d.endpoint', { url: x.a.endpoint })}</div>
+          <div class="small muted mt-s">${t('d.secretHint')}</div>
+          <div class="secret mt-s">${x.a.secret}</div></details></td>
+      <td>${trustRing(x.p.index, x.p.level, 44)}</td>
+      <td>${x.a.status === 'active' ? html`<span class="tag green">${t('d.statusActive')}</span>` : html`<span class="tag amber">${t('d.statusPaused')}</span>`}</td>
+      <td>${t.num(x.p.stats.total30)}<div class="small muted">${t.pct(x.p.stats.successRate)}</div></td>
+      <td>${examCell(t, x)}</td>
       <td><div class="row">
-        <a class="btn btn-sm" href="/me/agents/${a.id}/edit">Изменить</a>
-        <form method="post" action="/me/agents/${a.id}/${a.status === 'active' ? 'pause' : 'resume'}">${csrfField(csrf)}
-          <button class="btn btn-sm">${a.status === 'active' ? 'Пауза' : 'Включить'}</button></form>
+        <a class="btn btn-sm" href="/me/agents/${x.a.id}/edit">${t('d.edit')}</a>
+        <form method="post" action="/me/agents/${x.a.id}/${x.a.status === 'active' ? 'pause' : 'resume'}">${csrfField(csrf)}
+          <button class="btn btn-sm">${x.a.status === 'active' ? t('d.pause') : t('d.resume')}</button></form>
       </div></td>
     </tr>`)}</tbody></table></div>`
-    : html`<div class="card empty mb">У вас пока нет агентов. <a class="grad" href="/publish">Опубликуйте первого</a>: это займёт пару минут.</div>`}
+    : html`<div class="card empty mb">${t('d.empty1')}<a class="grad" href="/publish">${t('d.emptyLink')}</a>${t('d.empty2')}</div>`}
 
-  <h2 class="section-title">API-ключи</h2>
-  <p class="section-sub">Для вызова агентов из кода или из вашего собственного агента. Такие задачи помечаются как «от агента».</p>
+  <h2 class="section-title">${t('d.keys')}</h2>
+  <p class="section-sub">${t('d.keysSub')}</p>
   <div class="card form-card">
     <form method="post" action="/me/keys" class="row">
       ${csrfField(csrf)}
-      <input type="text" name="name" placeholder="Название ключа, например «мой Claude-агент»" aria-label="Название ключа">
-      <button class="btn btn-primary">Создать ключ</button>
+      <input type="text" name="name" placeholder="${t('d.keyPh')}" aria-label="${t('d.th.name')}">
+      <button class="btn btn-primary">${t('d.keyCreate')}</button>
     </form>
-    ${keys.length ? html`<table class="list mt"><thead><tr><th>Название</th><th>Ключ</th><th>Последний вызов</th><th></th></tr></thead><tbody>
+    ${keys.length ? html`<table class="list mt"><thead><tr><th>${t('d.th.name')}</th><th>${t('d.th.key')}</th><th>${t('d.th.lastUsed')}</th><th></th></tr></thead><tbody>
       ${keys.map((k) => html`<tr><td>${k.name}</td><td><code>${k.prefix}…</code></td>
-        <td class="muted">${k.last_used_at ? new Date(k.last_used_at).toLocaleString('ru-RU') : 'не использовался'}</td>
-        <td><form method="post" action="/me/keys/${k.id}/revoke">${csrfField(csrf)}<button class="btn btn-sm btn-danger">Отозвать</button></form></td></tr>`)}
-    </tbody></table>` : html`<p class="muted small mt-s">Ключей пока нет.</p>`}
+        <td class="muted">${k.last_used_at ? t.dateTime(k.last_used_at) : t('d.never')}</td>
+        <td><form method="post" action="/me/keys/${k.id}/revoke">${csrfField(csrf)}<button class="btn btn-sm btn-danger">${t('d.revoke')}</button></form></td></tr>`)}
+    </tbody></table>` : html`<p class="muted small mt-s">${t('d.noKeys')}</p>`}
   </div>
 </main>`,
+  });
+}
+
+function detailText(t, d) {
+  if (!d) return '';
+  if (d.key === 'ex.detail.latency') return t(d.key, { time: t.ms(d.ms) });
+  if (d.key === 'ex.detail.error') return t(d.key, { error: describeTaskError(t, d.error) });
+  return t(d.key);
+}
+
+export function examPage({ t, user, csrf, agent, latest, validity, cooldown, path }) {
+  const byId = Object.fromEntries((latest?.results || []).map((r) => [r.id, r]));
+  const group = (name) => html`<h3 class="mt">${t(`ex.group.${name}`)}</h3><div class="exam">
+    ${EXAM_CHECKS[name].map((id) => {
+      const r = byId[id];
+      return html`<div class="exam-row">
+        <span class="${r ? (r.pass ? 'ok' : 'danger') : 'muted'}">${r ? (r.pass ? '✓' : '✗') : '·'}</span>
+        <span>${t(`ex.c.${id}`)}${r?.detail ? html`<div class="small muted">${detailText(t, r.detail)}</div>` : ''}</span>
+        <span class="small ${r ? (r.pass ? 'ok' : 'danger') : 'muted'}">${r ? (r.pass ? t('ex.pass') : t('ex.fail')) : ''}</span>
+      </div>`;
+    })}</div>`;
+  const running = latest?.status === 'running';
+  return layout({
+    t, title: t('ex.title', { name: agent.name }), user, csrf, active: 'me', path,
+    body: html`<main class="container page"><div class="mid">
+  <p class="mb"><a class="grad" href="/me">${t('ex.back')}</a></p>
+  <div class="card form-card">
+    <h1>${t('ex.title', { name: agent.name })}</h1>
+    <p class="muted">${t('ex.sub')}</p>
+    ${running ? html`<div class="alert warn mt">${t('ex.running')}</div>` : ''}
+    ${latest?.status === 'failed' ? html`<div class="alert bad mt">${t('ex.failedRun')}</div>` : ''}
+    ${!running && validity === 'outdated' ? html`<div class="alert warn mt">${t('ex.outdated')}</div>` : ''}
+    ${!running && validity === 'expired' ? html`<div class="alert warn mt">${t('ex.expired')}</div>` : ''}
+    ${latest?.status === 'done' ? html`<div class="kpis mt exam-kpis">
+      <div class="card kpi"><span>${t('ex.quality')}</span><b>${t.pct(latest.quality_score)}</b></div>
+      <div class="card kpi"><span>${t('ex.safety')}</span><b>${t.pct(latest.safety_score)}</b></div>
+      <div class="card kpi"><span>${t('ex.finished', { date: '' })}</span><b class="small">${t.dateTime(latest.finished_at)}</b></div>
+    </div>` : ''}
+    ${!latest ? html`<p class="mt">${t('ex.none')}</p>` : ''}
+    ${latest?.status === 'done' ? html`${group('quality')}${group('safety')}` : ''}
+    <div class="row space mt">
+      ${cooldown > 0 && !running ? html`<span class="small muted">${t('ex.cooldown', { min: cooldown })}</span>` : html`<span></span>`}
+      ${running ? '' : html`<form method="post" action="/me/agents/${agent.id}/exam">${csrfField(csrf)}
+        <button class="btn btn-primary" ${cooldown > 0 ? 'disabled' : ''}>${latest ? t('ex.rerun') : t('ex.run')}</button></form>`}
+    </div>
+  </div>
+</div></main>`,
   });
 }

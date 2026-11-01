@@ -2,7 +2,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-const SCHEMA = `
+// Миграция 1: схема этапа 1. Не меняйте её: новые изменения добавляйте следующими миграциями.
+const SCHEMA_V1 = `
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY,
   username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -90,21 +91,99 @@ CREATE INDEX IF NOT EXISTS tasks_agent_time ON tasks(agent_id, created_at);
 CREATE INDEX IF NOT EXISTS tasks_buyer_time ON tasks(buyer_id, created_at);
 `;
 
+// Миграция 2: языки, регион и переводы карточки; отзывы; экзамены Agora.
+const SCHEMA_V2 = `
+ALTER TABLE agents ADD COLUMN primary_lang TEXT NOT NULL DEFAULT 'ru';   -- язык описания карточки
+ALTER TABLE agents ADD COLUMN languages    TEXT NOT NULL DEFAULT 'ru';   -- на каких языках отвечает: 'ru,en'
+ALTER TABLE agents ADD COLUMN region       TEXT NOT NULL DEFAULT 'global';
+ALTER TABLE agents ADD COLUMN i18n         TEXT NOT NULL DEFAULT '{}';   -- переводы карточки: {"en": {"name": ...}}
+ALTER TABLE agents ADD COLUMN i18n_text    TEXT NOT NULL DEFAULT '';     -- переводы одной строкой, для поиска
+
+-- Поиск теперь учитывает и переводы карточки
+DROP TRIGGER IF EXISTS agents_ai;
+DROP TRIGGER IF EXISTS agents_ad;
+DROP TRIGGER IF EXISTS agents_au;
+DROP TABLE IF EXISTS agents_fts;
+CREATE VIRTUAL TABLE agents_fts USING fts5(
+  name, tagline, description, tags, i18n_text,
+  content='agents', content_rowid='id',
+  tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER agents_ai AFTER INSERT ON agents BEGIN
+  INSERT INTO agents_fts(rowid, name, tagline, description, tags, i18n_text)
+  VALUES (new.id, new.name, new.tagline, new.description, new.tags, new.i18n_text);
+END;
+CREATE TRIGGER agents_ad AFTER DELETE ON agents BEGIN
+  INSERT INTO agents_fts(agents_fts, rowid, name, tagline, description, tags, i18n_text)
+  VALUES ('delete', old.id, old.name, old.tagline, old.description, old.tags, old.i18n_text);
+END;
+CREATE TRIGGER agents_au AFTER UPDATE ON agents BEGIN
+  INSERT INTO agents_fts(agents_fts, rowid, name, tagline, description, tags, i18n_text)
+  VALUES ('delete', old.id, old.name, old.tagline, old.description, old.tags, old.i18n_text);
+  INSERT INTO agents_fts(rowid, name, tagline, description, tags, i18n_text)
+  VALUES (new.id, new.name, new.tagline, new.description, new.tags, new.i18n_text);
+END;
+INSERT INTO agents_fts(agents_fts) VALUES ('rebuild');
+
+-- Отзывы: один на автора и канал (человек через сайт / агент через API). Только после реальной задачи.
+CREATE TABLE reviews (
+  id          INTEGER PRIMARY KEY,
+  agent_id    INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  author_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  author_type TEXT NOT NULL CHECK (author_type IN ('human', 'agent')),
+  rating      INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  text        TEXT NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  UNIQUE (agent_id, author_id, author_type)
+);
+CREATE INDEX reviews_agent ON reviews(agent_id, updated_at);
+
+-- Экзамены Agora. Учитывается последний завершённый, если эндпоинт и версия не менялись и ему меньше 30 дней.
+CREATE TABLE exams (
+  id            INTEGER PRIMARY KEY,
+  agent_id      INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  status        TEXT NOT NULL CHECK (status IN ('running', 'done', 'failed')),
+  endpoint      TEXT NOT NULL,
+  version       TEXT NOT NULL,
+  quality_score REAL,
+  safety_score  REAL,
+  results       TEXT NOT NULL DEFAULT '[]',
+  started_at    INTEGER NOT NULL,
+  finished_at   INTEGER
+);
+CREATE INDEX exams_agent ON exams(agent_id, started_at);
+`;
+
+export const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2];
+
 export function openDb(path) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   if (path !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
-  db.exec(SCHEMA);
   migrate(db);
+  // Экзамены, прерванные перезапуском сервера, помечаем как неудавшиеся
+  db.prepare(`UPDATE exams SET status = 'failed', finished_at = ? WHERE status = 'running'`).run(Date.now());
   return db;
 }
 
-/** Миграции для баз, созданных более ранними версиями. Каждая проверяет, нужна ли она. */
+export const schemaVersion = (db) => db.prepare('PRAGMA user_version').get().user_version;
+
 function migrate(db) {
-  const hasColumn = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
-  if (!hasColumn('tasks', 'self_test')) {
-    db.exec('ALTER TABLE tasks ADD COLUMN self_test INTEGER NOT NULL DEFAULT 0');
+  let version = schemaVersion(db);
+  if (version === 0 && db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users'`).get()) {
+    // База этапа 1 без номера версии. В самых ранних не было колонки self_test.
+    const hasSelfTest = db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'self_test');
+    if (!hasSelfTest) db.exec('ALTER TABLE tasks ADD COLUMN self_test INTEGER NOT NULL DEFAULT 0');
+    db.exec('PRAGMA user_version = 1');
+    version = 1;
+  }
+  for (let v = version; v < MIGRATIONS.length; v++) {
+    tx(db, () => {
+      db.exec(MIGRATIONS[v]);
+      db.exec(`PRAGMA user_version = ${v + 1}`);
+    });
   }
 }
 

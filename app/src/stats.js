@@ -1,38 +1,53 @@
 // Метрики паспорта доверия. Считаются только из задач, прошедших через шлюз Agora.
+// Задачи владельца своему агенту (self_test) не учитываются.
 
 const DAY = 86400_000;
+/** Сколько задач одного покупателя учитывается в метриках за 30 дней: защита от накрутки одним аккаунтом. */
+export const PER_BUYER_CAP = 10;
 
 export function agentStats(db, agentId, now = Date.now()) {
   const total = db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE agent_id = ? AND self_test = 0').get(agentId).n;
-  const rows = db.prepare(
-    'SELECT status, latency_ms, buyer_id, buyer_type FROM tasks WHERE agent_id = ? AND self_test = 0 AND created_at >= ?'
+  const all = db.prepare(
+    `SELECT status, latency_ms, buyer_id, buyer_type FROM tasks
+     WHERE agent_id = ? AND self_test = 0 AND created_at >= ? ORDER BY created_at DESC`
   ).all(agentId, now - 30 * DAY);
 
-  const total30 = rows.length;
-  if (total30 === 0) {
-    return { total, total30, successRate: null, availability: null, medianLatency: null, repeatBuyers: null, agentShare: null };
+  // Не больше PER_BUYER_CAP последних задач от каждого покупателя
+  const perBuyer = new Map();
+  const rows = [];
+  for (const r of all) {
+    const key = r.buyer_id ?? 'deleted';
+    const n = (perBuyer.get(key) || 0) + 1;
+    perBuyer.set(key, n);
+    if (n <= PER_BUYER_CAP) rows.push(r);
+  }
+  const buyers = [...perBuyer.keys()].filter((k) => k !== 'deleted').length;
+  const repeatCount = [...perBuyer.entries()].filter(([k, n]) => k !== 'deleted' && n >= 2).length;
+
+  const total30 = all.length;
+  const counted = rows.length;
+  if (counted === 0) {
+    return { total, total30, counted, buyers: 0, repeatCount: 0, ok: 0, responded: 0, successRate: null, availability: null, medianLatency: null, repeatBuyers: null, agentShare: null };
   }
 
   const ok = rows.filter((r) => r.status === 'ok');
   // «Доступность»: агент вообще ответил (пусть даже ошибкой), а не упал по таймауту и не был недоступен
   const responded = rows.filter((r) => r.status === 'ok' || r.status === 'agent_error').length;
-
   const latencies = ok.map((r) => r.latency_ms).filter((x) => x != null).sort((a, b) => a - b);
-  const medianLatency = latencies.length ? latencies[Math.floor((latencies.length - 1) / 2)] : null;
-
-  const perBuyer = new Map();
-  for (const r of rows) if (r.buyer_id != null) perBuyer.set(r.buyer_id, (perBuyer.get(r.buyer_id) || 0) + 1);
-  const buyers = perBuyer.size;
-  const repeat = [...perBuyer.values()].filter((n) => n >= 2).length;
 
   return {
     total,
     total30,
-    successRate: ok.length / total30,
-    availability: responded / total30,
-    medianLatency,
-    repeatBuyers: buyers ? repeat / buyers : null,
-    agentShare: rows.filter((r) => r.buyer_type === 'agent').length / total30,
+    counted,
+    buyers,
+    repeatCount,
+    ok: ok.length,
+    responded,
+    successRate: ok.length / counted,
+    availability: responded / counted,
+    medianLatency: latencies.length ? latencies[Math.floor((latencies.length - 1) / 2)] : null,
+    repeatBuyers: buyers ? repeatCount / buyers : null,
+    agentShare: rows.filter((r) => r.buyer_type === 'agent').length / counted,
   };
 }
 
@@ -58,6 +73,3 @@ export function platformStats(db) {
   const t = db.prepare(`SELECT COUNT(*) AS n, SUM(status = 'ok') AS ok, SUM(buyer_type = 'agent') AS ag FROM tasks WHERE self_test = 0`).get();
   return { tasks: t.n || 0, okRate: t.n ? (t.ok || 0) / t.n : null, agentTasks: t.ag || 0 };
 }
-
-export const pct = (x) => (x == null ? '—' : `${(Math.round(x * 1000) / 10).toLocaleString('ru-RU')}%`);
-export const ms = (x) => (x == null ? '—' : x < 1000 ? `${x} мс` : `${(x / 1000).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} с`);

@@ -32,9 +32,9 @@ export function validateRegistration({ username, password, display_name }) {
   username = String(username || '').trim().toLowerCase();
   display_name = String(display_name || '').trim();
   password = String(password || '');
-  if (!USERNAME_RE.test(username)) errors.username = 'От 3 до 24 символов: латиница, цифры, _';
-  if (display_name.length < 2 || display_name.length > 60) errors.display_name = 'От 2 до 60 символов';
-  if (password.length < 8 || password.length > 200) errors.password = 'Минимум 8 символов';
+  if (!USERNAME_RE.test(username)) errors.username = { code: 'username' };
+  if (display_name.length < 2 || display_name.length > 60) errors.display_name = { code: 'display_name' };
+  if (password.length < 8 || password.length > 200) errors.password = { code: 'password' };
   return { errors, values: { username, display_name, password } };
 }
 
@@ -155,7 +155,7 @@ export function csrfProtect(req, res, next) {
   const expected = req.csrfFromCookie || '';
   const ok = sent.length > 0 && sent.length === expected.length &&
     timingSafeEqual(Buffer.from(sent), Buffer.from(expected));
-  if (!ok) return res.status(403).type('text/plain; charset=utf-8').send('Неверный CSRF-токен. Обновите страницу и попробуйте снова.');
+  if (!ok) return res.status(403).type('text/plain; charset=utf-8').send(req.t ? req.t('error.csrf') : 'Invalid CSRF token');
   next();
 }
 
@@ -172,7 +172,7 @@ export function memoryRateLimit({ windowMs, max }) {
     const key = req.ip;
     const list = (hits.get(key) || []).filter((t) => now - t < windowMs);
     if (list.length >= max) {
-      return res.status(429).type('text/plain; charset=utf-8').send('Слишком много попыток. Подождите несколько минут.');
+      return res.status(429).type('text/plain; charset=utf-8').send(req.t ? req.t('error.tooManyAttempts') : 'Too many attempts');
     }
     list.push(now);
     hits.set(key, list);

@@ -1,13 +1,15 @@
 import { html } from '../html.js';
+import { UI_LOCALES } from '../i18n/index.js';
 
-export function layout({ title, user, csrf, active = '', body }) {
+export function layout({ t, title, user, csrf, active = '', body, path = '/' }) {
   const nav = (href, key, label) => html`<a href="${href}" class="${active === key ? 'active' : ''}">${label}</a>`;
+  const langLinks = UI_LOCALES.map((l) => html`<a href="/lang/${l}?next=${encodeURIComponent(path)}" class="${t.locale === l ? 'on' : ''}" hreflang="${l}" lang="${l}">${l.toUpperCase()}</a>`);
   return html`<!DOCTYPE html>
-<html lang="ru">
+<html lang="${t.locale}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title ? `${title} · Agora` : 'Agora: каталог ИИ-агентов'}</title>
+<title>${title ? `${title} · Agora` : t('site.title')}</title>
 <link rel="stylesheet" href="/base.css">
 <link rel="stylesheet" href="/app.css">
 </head>
@@ -16,44 +18,48 @@ export function layout({ title, user, csrf, active = '', body }) {
   <div class="container">
     <a href="/" class="logo"><span class="logo-mark">◆</span>Agora</a>
     <div class="nav-links">
-      ${nav('/', 'catalog', 'Каталог')}
-      ${nav('/docs', 'docs', 'Для разработчиков')}
-      ${user ? nav('/me', 'me', 'Кабинет') : ''}
+      ${nav('/', 'catalog', t('nav.catalog'))}
+      ${nav('/docs', 'docs', t('nav.docs'))}
+      ${user ? nav('/me', 'me', t('nav.me')) : ''}
     </div>
     <div class="nav-right">
+      <div class="lang-switch" role="group" aria-label="${t('nav.language')}">${langLinks}</div>
       ${user
-        ? html`<a href="/publish" class="btn btn-ghost">Опубликовать агента</a>
+        ? html`<a href="/publish" class="btn btn-ghost">${t('nav.publish')}</a>
           <form method="post" action="/logout" class="inline"><input type="hidden" name="_csrf" value="${csrf}">
-          <button class="btn">Выйти (@${user.username})</button></form>`
-        : html`<a href="/register" class="btn btn-ghost">Регистрация</a><a href="/login" class="btn btn-primary">Войти</a>`}
+          <button class="btn">${t('nav.logout', { username: user.username })}</button></form>`
+        : html`<a href="/register" class="btn btn-ghost">${t('nav.register')}</a><a href="/login" class="btn btn-primary">${t('nav.login')}</a>`}
     </div>
   </div>
 </nav>
 ${body}
-<footer><div class="container">Agora · этап 1: каталог без оплаты · Agora не хранит содержимое задач, только их метаданные для паспорта доверия</div></footer>
+<footer><div class="container">${t('footer')}</div></footer>
 </body>
 </html>`;
 }
 
 export const csrfField = (csrf) => html`<input type="hidden" name="_csrf" value="${csrf}">`;
 
+/** Текст ошибки поля: { code, ...params } → строка на языке интерфейса. */
+export const errText = (t, e) => (e ? t(`err.${e.code}`, e) : '');
+
 /** Поле формы с подписью, подсказкой и ошибкой. */
-export function field({ name, label, value = '', error, help, type = 'text', textarea = false, placeholder = '', rows }) {
+export function field({ t, name, label, value = '', error, help, type = 'text', textarea = false, placeholder = '', rows }) {
   const control = textarea
     ? html`<textarea id="f-${name}" name="${name}" placeholder="${placeholder}" rows="${rows || 5}">${value}</textarea>`
     : html`<input id="f-${name}" type="${type}" name="${name}" value="${value}" placeholder="${placeholder}">`;
   return html`<div class="field ${error ? 'has-err' : ''}">
     <label for="f-${name}">${label}</label>${control}
-    ${error ? html`<div class="err">${error}</div>` : ''}
+    ${error ? html`<div class="err">${errText(t, error)}</div>` : ''}
     ${help ? html`<div class="help">${help}</div>` : ''}
   </div>`;
 }
 
-export function errorPage({ status, message, user, csrf }) {
+export function errorPage({ t, status, message, user, csrf, path }) {
   return layout({
-    title: `Ошибка ${status}`, user, csrf,
+    t, title: t('error.title', { status }), user, csrf, path,
     body: html`<main class="container page"><div class="card form-card narrow">
-      <h1>${status === 404 ? 'Страница не найдена' : 'Что-то пошло не так'}</h1>
-      <p class="muted">${message}</p><p class="mt"><a href="/" class="btn">← В каталог</a></p></div></main>`,
+      <h1>${status === 404 ? t('error.notFound') : t('error.generic')}</h1>
+      <p class="muted">${message}</p><p class="mt"><a href="/" class="btn">${t('error.back')}</a></p></div></main>`,
   });
 }

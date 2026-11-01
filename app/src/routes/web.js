@@ -6,35 +6,53 @@ import {
 } from '../auth.js';
 import {
   CATEGORIES, validateAgent, createAgent, updateAgent, setAgentStatus, rotateAgentSecret, deleteAgent, slugTaken,
-  getAgentByPath, getOwnAgent, listOwnAgents, searchAgents, countActiveAgents, categoryCounts, agentPath, agentCard,
+  getAgentByPath, getOwnAgent, listOwnAgents, countActiveAgents, categoryCounts, agentPath, agentCard,
+  localizeAgent, agentFormValues,
 } from '../agents.js';
-import { agentStats, dailyTasks, platformStats } from '../stats.js';
+import { dailyTasks, platformStats } from '../stats.js';
+import { trustPassport } from '../trust.js';
+import { listCatalog } from '../catalog.js';
 import { invokeAgent, HttpError } from '../gateway.js';
+import { reviewEligibility, validateReview, upsertReview, getOwnReview, listReviews } from '../reviews.js';
+import { startExam, latestExam, validExam, examCooldownMinutes } from '../exam.js';
+import { isUiLocale, LANG_COOKIE, AGENT_LANGUAGES } from '../i18n/index.js';
 import { homePage, agentPage } from '../views/catalog.js';
 import { loginPage, registerPage, agentFormPage } from '../views/forms.js';
-import { dashboardPage } from '../views/dashboard.js';
+import { dashboardPage, examPage } from '../views/dashboard.js';
 import { docsPage } from '../views/docs.js';
 import { errorPage } from '../views/layout.js';
 
 const send = (res, page, status = 200) => res.status(status).type('html').send(String(page));
 
-/** Разрешаем только внутренние относительные адреса для ?next= (защита от open redirect). */
-const safeNext = (n) => (typeof n === 'string' && /^\/(?![/\\])/.test(n) ? n : '/me');
+/** Разрешаем только внутренние относительные адреса (защита от open redirect). */
+const safeNext = (n, fallback = '/me') => (typeof n === 'string' && /^\/(?![/\\])/.test(n) ? n : fallback);
 
-export function webRouter(db, config) {
+export function webRouter(db, config, pending) {
   const r = Router();
-  const ctx = (req) => ({ user: req.user, csrf: req.csrfToken });
+  const ctx = (req) => ({ t: req.t, user: req.user, csrf: req.csrfToken, path: req.originalUrl });
   const authLimit = memoryRateLimit({ windowMs: 15 * 60_000, max: config.authRateLimit });
+  const track = (promise) => { pending.add(promise); promise.finally(() => pending.delete(promise)); };
 
   r.use(csrfProtect);
+
+  // ---------- Язык интерфейса ----------
+
+  r.get('/lang/:code', (req, res) => {
+    const code = req.params.code;
+    if (isUiLocale(code)) {
+      res.append('Set-Cookie', `${LANG_COOKIE}=${code}; Path=/; SameSite=Lax; Max-Age=${365 * 24 * 3600}${config.cookieSecure ? '; Secure' : ''}`);
+    }
+    res.redirect(303, safeNext(req.query.next, '/'));
+  });
 
   // ---------- Каталог ----------
 
   r.get('/', (req, res) => {
     const q = String(req.query.q || '').slice(0, 200);
     const category = CATEGORIES.some((c) => c.id === req.query.cat) ? req.query.cat : '';
-    const agents = searchAgents(db, { q, category, limit: 60 });
-    send(res, homePage({ ...ctx(req), q, category, agents, counts: categoryCounts(db), total: countActiveAgents(db), platform: platformStats(db) }));
+    const lang = AGENT_LANGUAGES.includes(req.query.lang) ? req.query.lang : '';
+    const items = listCatalog(db, { q, category, lang, locale: req.t.locale });
+    send(res, homePage({ ...ctx(req), q, category, lang, items, counts: categoryCounts(db), total: countActiveAgents(db), platform: platformStats(db) }));
   });
 
   r.get('/docs', (req, res) => send(res, docsPage({ ...ctx(req), baseUrl: config.baseUrl })));
@@ -45,32 +63,62 @@ export function webRouter(db, config) {
     if (!a || (a.status !== 'active' && a.owner_id !== req.user?.id)) return null;
     return a;
   };
+  const agentNotFound = (req, res) => send(res, errorPage({ ...ctx(req), status: 404, message: req.t('error.agentNotFound') }), 404);
+
+  const renderAgent = (req, res, a, extra = {}, status = 200) => {
+    send(res, agentPage({
+      ...ctx(req),
+      a: localizeAgent(a, req.t.locale),
+      passport: trustPassport(db, a),
+      baseUrl: config.baseUrl,
+      reviews: listReviews(db, a.id),
+      eligibility: reviewEligibility(db, a, req.user),
+      ownReview: req.user ? getOwnReview(db, a.id, req.user.id) : null,
+      reviewErrors: {},
+      reviewSaved: req.query.review === 'saved',
+      ...extra,
+    }), status);
+  };
 
   r.get('/a/:owner/:slug/agent.json', (req, res) => {
     const a = findPublicAgent(req);
     if (!a) return res.status(404).json({ error: 'not_found' });
-    res.json(agentCard(a, agentStats(db, a.id), config.baseUrl));
+    res.json(agentCard(a, trustPassport(db, a), config.baseUrl));
   });
 
   r.get('/a/:owner/:slug', (req, res) => {
     const a = findPublicAgent(req);
-    if (!a) return send(res, errorPage({ ...ctx(req), status: 404, message: 'Такого агента нет или он скрыт создателем.' }), 404);
-    send(res, agentPage({ ...ctx(req), a, stats: agentStats(db, a.id), baseUrl: config.baseUrl }));
+    if (!a) return agentNotFound(req, res);
+    renderAgent(req, res, a);
   });
 
   r.post('/a/:owner/:slug/try', requireLogin, async (req, res) => {
     const a = findPublicAgent(req);
-    if (!a) return send(res, errorPage({ ...ctx(req), status: 404, message: 'Агент не найден.' }), 404);
+    if (!a) return agentNotFound(req, res);
     const input = String(req.body.input || '');
     let result = null, error = null, status = 200;
     try {
-      result = await invokeAgent(db, config, a, { input, buyer: req.user, channel: 'web' });
+      result = await invokeAgent(db, config, a, { input, buyer: req.user, channel: 'web', locale: req.t.locale });
     } catch (err) {
       if (!(err instanceof HttpError)) throw err;
-      error = err.message;
+      error = req.t(`gw.${err.code}`, err.params);
       status = err.status;
     }
-    send(res, agentPage({ ...ctx(req), a, stats: agentStats(db, a.id), baseUrl: config.baseUrl, input, result, error }), status);
+    renderAgent(req, res, a, { input, result, error }, status);
+  });
+
+  r.post('/a/:owner/:slug/review', requireLogin, (req, res) => {
+    const a = findPublicAgent(req);
+    if (!a) return agentNotFound(req, res);
+    const { errors, values } = validateReview(req.body);
+    if (Object.keys(errors).length) return renderAgent(req, res, a, { reviewErrors: errors, ownReview: { ...values, rating: null } }, 400);
+    try {
+      upsertReview(db, a, req.user, 'human', values);
+    } catch (err) {
+      if (!(err instanceof HttpError)) throw err;
+      return renderAgent(req, res, a, {}, err.status);
+    }
+    res.redirect(303, `${agentPath(a)}?review=saved#reviews`);
   });
 
   // ---------- Вход и регистрация ----------
@@ -79,7 +127,7 @@ export function webRouter(db, config) {
 
   r.post('/register', authLimit, (req, res) => {
     const { errors, values } = validateRegistration(req.body);
-    if (!errors.username && findUserByUsername(db, values.username)) errors.username = 'Этот логин уже занят';
+    if (!errors.username && findUserByUsername(db, values.username)) errors.username = { code: 'username_taken' };
     if (Object.keys(errors).length) return send(res, registerPage({ ...ctx(req), values, errors }), 400);
     const userId = createUser(db, values);
     setSessionCookie(res, config, createSession(db, userId));
@@ -92,7 +140,7 @@ export function webRouter(db, config) {
     const username = String(req.body.username || '').trim();
     const user = findUserByUsername(db, username);
     const ok = user && !user.is_system && verifyPassword(String(req.body.password || ''), user.password_hash);
-    if (!ok) return send(res, loginPage({ ...ctx(req), values: { username }, error: 'Неверный логин или пароль', next: safeNext(req.body.next) }), 401);
+    if (!ok) return send(res, loginPage({ ...ctx(req), values: { username }, error: req.t('login.bad'), next: safeNext(req.body.next) }), 401);
     if (req.sessionToken) destroySession(db, req.sessionToken);
     setSessionCookie(res, config, createSession(db, user.id));
     res.redirect(303, safeNext(req.body.next));
@@ -108,10 +156,15 @@ export function webRouter(db, config) {
 
   const renderDashboard = (req, res, extra = {}) => {
     const own = listOwnAgents(db, req.user.id);
-    const agents = own.map((a) => ({ a, s: agentStats(db, a.id) }));
-    const t30 = agents.reduce((n, x) => n + x.s.total30, 0);
-    const weighted = (key) => (t30 ? agents.reduce((n, x) => n + (x.s[key] || 0) * x.s.total30, 0) / t30 : null);
-    const totals = { tasks: t30, all: agents.reduce((n, x) => n + x.s.total, 0), okRate: weighted('successRate'), agentShare: weighted('agentShare') };
+    const agents = own.map((a) => ({ a: localizeAgent(a, req.t.locale), p: trustPassport(db, a), latest: latestExam(db, a.id) }));
+    const t30 = agents.reduce((n, x) => n + x.p.stats.counted, 0);
+    const weighted = (key) => (t30 ? agents.reduce((n, x) => n + (x.p.stats[key] || 0) * x.p.stats.counted, 0) / t30 : null);
+    const totals = {
+      tasks: agents.reduce((n, x) => n + x.p.stats.total30, 0),
+      all: agents.reduce((n, x) => n + x.p.stats.total, 0),
+      okRate: weighted('successRate'),
+      agentShare: weighted('agentShare'),
+    };
     send(res, dashboardPage({
       ...ctx(req), agents, totals, days: dailyTasks(db, own.map((a) => a.id)), keys: listApiKeys(db, req.user.id),
       notice: String(req.query.ok || ''), ...extra,
@@ -121,7 +174,7 @@ export function webRouter(db, config) {
   r.get('/me', requireLogin, (req, res) => renderDashboard(req, res));
 
   r.post('/me/keys', requireLogin, (req, res) => {
-    const name = String(req.body.name || '').trim().slice(0, 60) || 'ключ без названия';
+    const name = String(req.body.name || '').trim().slice(0, 60) || req.t('d.keyDefault');
     const key = createApiKey(db, req.user.id, name);
     // Ключ показываем прямо в ответе, а не через редирект: он не должен попасть в URL и историю
     renderDashboard(req, res, { newKey: key, notice: '' });
@@ -132,34 +185,36 @@ export function webRouter(db, config) {
     res.redirect(303, '/me?ok=key_revoked');
   });
 
-  r.get('/publish', requireLogin, (req, res) => send(res, agentFormPage({ ...ctx(req), mode: 'create', devEndpoints: config.devEndpoints })));
+  const formOpts = (req) => ({ devEndpoints: config.devEndpoints, allowBuiltin: !!req.user.is_system });
+
+  r.get('/publish', requireLogin, (req, res) => send(res, agentFormPage({ ...ctx(req), mode: 'create', values: { primary_lang: req.t.locale }, devEndpoints: config.devEndpoints })));
 
   r.post('/publish', requireLogin, (req, res) => {
-    const { errors, values } = validateAgent(req.body, { devEndpoints: config.devEndpoints, allowBuiltin: !!req.user.is_system });
-    if (!errors.slug && slugTaken(db, req.user.id, values.slug)) errors.slug = 'У вас уже есть агент с таким адресом';
+    const { errors, values } = validateAgent(req.body, formOpts(req));
+    if (!errors.slug && slugTaken(db, req.user.id, values.slug)) errors.slug = { code: 'slug_taken' };
     if (Object.keys(errors).length) {
-      return send(res, agentFormPage({ ...ctx(req), mode: 'create', values, errors, devEndpoints: config.devEndpoints }), 400);
+      return send(res, agentFormPage({ ...ctx(req), mode: 'create', values: { ...req.body, ...values, languages: values.languages }, errors, devEndpoints: config.devEndpoints }), 400);
     }
     createAgent(db, req.user.id, values);
     res.redirect(303, '/me?ok=published');
   });
 
   const ownAgent = (req) => getOwnAgent(db, Number(req.params.id), req.user.id);
-  const notFound = (req, res) => send(res, errorPage({ ...ctx(req), status: 404, message: 'Агент не найден.' }), 404);
+  const notFound = (req, res) => agentNotFound(req, res);
 
   r.get('/me/agents/:id/edit', requireLogin, (req, res) => {
     const a = ownAgent(req);
     if (!a) return notFound(req, res);
-    send(res, agentFormPage({ ...ctx(req), mode: 'edit', agent: a, values: a, devEndpoints: config.devEndpoints }));
+    send(res, agentFormPage({ ...ctx(req), mode: 'edit', agent: a, values: agentFormValues(a), devEndpoints: config.devEndpoints }));
   });
 
   r.post('/me/agents/:id/edit', requireLogin, (req, res) => {
     const a = ownAgent(req);
     if (!a) return notFound(req, res);
-    const { errors, values } = validateAgent(req.body, { devEndpoints: config.devEndpoints, allowBuiltin: !!req.user.is_system });
-    if (!errors.slug && slugTaken(db, req.user.id, values.slug, a.id)) errors.slug = 'У вас уже есть агент с таким адресом';
+    const { errors, values } = validateAgent(req.body, formOpts(req));
+    if (!errors.slug && slugTaken(db, req.user.id, values.slug, a.id)) errors.slug = { code: 'slug_taken' };
     if (Object.keys(errors).length) {
-      return send(res, agentFormPage({ ...ctx(req), mode: 'edit', agent: a, values, errors, devEndpoints: config.devEndpoints }), 400);
+      return send(res, agentFormPage({ ...ctx(req), mode: 'edit', agent: a, values: { ...req.body, ...values, languages: values.languages }, errors, devEndpoints: config.devEndpoints }), 400);
     }
     updateAgent(db, a.id, req.user.id, values);
     res.redirect(303, '/me?ok=saved');
@@ -185,6 +240,24 @@ export function webRouter(db, config) {
     res.redirect(303, '/me?ok=deleted');
   });
 
+  // ---------- Экзамен ----------
+
+  r.get('/me/agents/:id/exam', requireLogin, (req, res) => {
+    const a = ownAgent(req);
+    if (!a) return notFound(req, res);
+    send(res, examPage({
+      ...ctx(req), agent: localizeAgent(a, req.t.locale), latest: latestExam(db, a.id),
+      validity: validExam(db, a).state, cooldown: examCooldownMinutes(db, a.id),
+    }));
+  });
+
+  r.post('/me/agents/:id/exam', requireLogin, (req, res) => {
+    const a = ownAgent(req);
+    if (!a) return notFound(req, res);
+    const running = latestExam(db, a.id)?.status === 'running';
+    if (!running && examCooldownMinutes(db, a.id) === 0) track(startExam(db, config, a).done);
+    res.redirect(303, `/me/agents/${a.id}/exam`);
+  });
+
   return r;
 }
-

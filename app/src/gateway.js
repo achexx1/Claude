@@ -9,11 +9,13 @@ import net from 'node:net';
 import { randomToken } from './auth.js';
 import { runBuiltin } from './builtins.js';
 
+/** Ошибка запроса покупателя. code переводится интерфейсом (ключ gw.<code>), params подставляются в текст. */
 export class HttpError extends Error {
-  constructor(status, code, message) {
-    super(message);
+  constructor(status, code, params = {}) {
+    super(code);
     this.status = status;
     this.code = code;
+    this.params = params;
   }
 }
 
@@ -110,18 +112,57 @@ export function postJson(urlStr, payload, { headers = {}, timeoutMs = 30_000, ma
 
 const MAX_OUTPUT_CHARS = 50_000;
 
-/** Проверка ответа агента по протоколу Agora v0: { "output": { "text": "...", "data": {...}? } } */
+/**
+ * Проверка ответа агента по протоколу agora/v0: { "output": { "text": "...", "data": {...}? } }.
+ * Ошибка — код вида 'http:500' | 'not_json' | 'no_output' | 'too_long' (текст подставляет интерфейс, ключи te.*).
+ */
 export function parseAgentResponse(status, bodyText) {
-  if (status < 200 || status >= 300) return { error: `агент вернул HTTP ${status}` };
+  if (status < 200 || status >= 300) return { error: `http:${status}` };
   let json;
-  try { json = JSON.parse(bodyText); } catch { return { error: 'агент вернул не JSON' }; }
+  try { json = JSON.parse(bodyText); } catch { return { error: 'not_json' }; }
   const out = json?.output;
-  if (!out || typeof out !== 'object' || typeof out.text !== 'string') {
-    return { error: 'в ответе нет поля output.text (см. протокол в /docs)' };
-  }
-  if (out.text.length > MAX_OUTPUT_CHARS) return { error: 'output.text длиннее 50 000 символов' };
+  if (!out || typeof out !== 'object' || typeof out.text !== 'string') return { error: 'no_output' };
+  if (out.text.length > MAX_OUTPUT_CHARS) return { error: 'too_long' };
   const data = out.data && typeof out.data === 'object' ? out.data : null;
   return { output: { text: out.text, data } };
+}
+
+/** Текст ошибки задачи на языке интерфейса. */
+export function describeTaskError(t, code) {
+  if (!code) return '';
+  const [name, ...rest] = String(code).split(':');
+  return t(`te.${name}`, { detail: rest.join(':') });
+}
+
+/**
+ * Один вызов агента без записи в статистику (используют и задачи, и экзамен).
+ * Возвращает { status: 'ok'|'agent_error'|'timeout'|'unreachable', output, error, latency_ms }.
+ */
+export async function callAgent(config, agent, { taskId, input, context, timeoutMs }) {
+  const g = config.gateway;
+  const started = performance.now();
+  let status = 'ok', output = null, error = null;
+  try {
+    if (agent.endpoint.startsWith('builtin://')) {
+      output = runBuiltin(agent.endpoint.slice('builtin://'.length), input, { locale: context.locale });
+    } else {
+      const res = await postJson(agent.endpoint, { protocol: 'agora/v0', task_id: taskId, input: { text: input }, context }, {
+        headers: { 'x-agora-task-id': taskId, 'x-agora-secret': agent.secret },
+        timeoutMs: timeoutMs || g.timeoutMs,
+        maxBytes: g.maxResponseBytes,
+        allowPrivate: config.devEndpoints,
+      });
+      const parsed = parseAgentResponse(res.status, res.body);
+      if (parsed.error) { status = 'agent_error'; error = parsed.error; } else output = parsed.output;
+    }
+  } catch (err) {
+    if (err.code === 'ETIMEOUT') { status = 'timeout'; error = 'timeout'; }
+    else if (err.code === 'ETOOBIG') { status = 'agent_error'; error = 'too_big'; }
+    else if (err.code === 'EBLOCKED') { status = 'unreachable'; error = 'blocked'; }
+    else if (err.code) { status = 'unreachable'; error = `unreachable:${err.code}`; }
+    else { status = 'agent_error'; error = 'internal'; }
+  }
+  return { status, output: status === 'ok' ? output : null, error, latency_ms: Math.round(performance.now() - started) };
 }
 
 function recordTask(db, t) {
@@ -132,19 +173,19 @@ function recordTask(db, t) {
 
 /**
  * Поставить задачу агенту.
- * buyer: пользователь-покупатель; channel: 'web' | 'api'.
+ * buyer: пользователь-покупатель; channel: 'web' | 'api'; locale: язык, на котором покупатель хочет ответ.
  * Ошибки покупателя (пустой ввод, лимит) бросаются как HttpError и НЕ портят статистику агента.
  */
-export async function invokeAgent(db, config, agent, { input, buyer, channel }) {
+export async function invokeAgent(db, config, agent, { input, buyer, channel, locale = 'en' }) {
   const g = config.gateway;
-  if (agent.status !== 'active') throw new HttpError(409, 'agent_paused', 'Агент сейчас на паузе');
-  if (typeof input !== 'string' || !input.trim()) throw new HttpError(400, 'empty_input', 'Опишите задачу: поле input пустое');
-  if (input.length > g.maxInputChars) throw new HttpError(400, 'input_too_long', `Задача длиннее ${g.maxInputChars} символов`);
+  if (agent.status !== 'active') throw new HttpError(409, 'agent_paused');
+  if (typeof input !== 'string' || !input.trim()) throw new HttpError(400, 'empty_input');
+  if (input.length > g.maxInputChars) throw new HttpError(400, 'input_too_long', { max: g.maxInputChars });
 
   const limit = channel === 'api' ? g.hourlyLimitApi : g.hourlyLimitWeb;
   const used = db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE buyer_id = ? AND channel = ? AND created_at >= ?')
     .get(buyer.id, channel, Date.now() - 3600_000).n;
-  if (used >= limit) throw new HttpError(429, 'rate_limited', `Лимит ${limit} задач в час. Попробуйте позже.`);
+  if (used >= limit) throw new HttpError(429, 'rate_limited', { limit });
 
   const task = {
     id: `tsk_${randomToken(12)}`,
@@ -155,47 +196,21 @@ export async function invokeAgent(db, config, agent, { input, buyer, channel }) 
     // Задачи владельца своему агенту выполняются, но не влияют на паспорт (защита от накрутки)
     self_test: buyer.id === agent.owner_id ? 1 : 0,
     created_at: Date.now(),
-    status: 'ok',
-    latency_ms: null,
-    error: null,
   };
 
-  const started = performance.now();
-  let output = null;
-  try {
-    if (agent.endpoint.startsWith('builtin://')) {
-      output = runBuiltin(agent.endpoint.slice('builtin://'.length), input);
-    } else {
-      const res = await postJson(agent.endpoint, {
-        protocol: 'agora/v0',
-        task_id: task.id,
-        input: { text: input },
-        context: { buyer_type: task.buyer_type, channel, agent: `${agent.owner_username}/${agent.slug}` },
-      }, {
-        headers: { 'x-agora-task-id': task.id, 'x-agora-secret': agent.secret },
-        timeoutMs: g.timeoutMs,
-        maxBytes: g.maxResponseBytes,
-        allowPrivate: config.devEndpoints,
-      });
-      const parsed = parseAgentResponse(res.status, res.body);
-      if (parsed.error) { task.status = 'agent_error'; task.error = parsed.error; } else output = parsed.output;
-    }
-  } catch (err) {
-    if (err.code === 'ETIMEOUT') { task.status = 'timeout'; task.error = err.message; }
-    else if (err.code === 'ETOOBIG') { task.status = 'agent_error'; task.error = err.message; }
-    else if (err.code === 'EBLOCKED') { task.status = 'unreachable'; task.error = err.message; }
-    else if (err.code) { task.status = 'unreachable'; task.error = `агент недоступен (${err.code})`; }
-    else { task.status = 'agent_error'; task.error = 'внутренняя ошибка агента'; }
-  }
-  task.latency_ms = Math.round(performance.now() - started);
-  recordTask(db, task);
+  const res = await callAgent(config, agent, {
+    taskId: task.id,
+    input,
+    context: { buyer_type: task.buyer_type, channel, locale, agent: `${agent.owner_username}/${agent.slug}` },
+  });
+  recordTask(db, { ...task, status: res.status, latency_ms: res.latency_ms, error: res.error });
 
   return {
     task_id: task.id,
-    status: task.status,
+    status: res.status,
     self_test: task.self_test === 1,
-    latency_ms: task.latency_ms,
-    output: task.status === 'ok' ? output : null,
-    error: task.error,
+    latency_ms: res.latency_ms,
+    output: res.output,
+    error: res.error,
   };
 }

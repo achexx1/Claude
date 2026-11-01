@@ -59,7 +59,8 @@ test('эндпоинты: в продакшене только https', () => {
 
 test('поисковый запрос: основы слов и экранирование', () => {
   assert.equal(buildFtsQuery('проверить договор аренды'), '"провер"* OR "догов"* OR "арен"*');
-  assert.equal(buildFtsQuery('"; DROP TABLE agents; --'), '"drop"* OR "table"* OR "agents"*');
+  assert.equal(buildFtsQuery('"; DROP TABLE agents; --'), '"drop"* OR "table"* OR "agent"*');
+  assert.equal(buildFtsQuery('calculating taxes'), '"calculat"* OR "tax"*');
   assert.equal(buildFtsQuery('на и в'), null);
 });
 
