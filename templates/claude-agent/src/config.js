@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 const SYSTEM_NOTE_MODELS = /^claude-(opus-5|opus-4-8|fable|mythos|sonnet-5-5|haiku-5-5)/;
 
 export function loadConfig(env = process.env, root = process.cwd()) {
-  const model = env.CLAUDE_MODEL || 'claude-opus-5-5';
+  const model = env.AGENT_MODEL || 'claude-opus-5-5';
   return {
     port: Number(env.PORT || 4200),
     // Секрет агента из кабинета Agora. Без него сервер не запустится (кроме ALLOW_NO_SECRET=1 для опытов).
@@ -15,14 +15,14 @@ export function loadConfig(env = process.env, root = process.cwd()) {
     allowNoSecret: env.ALLOW_NO_SECRET === '1',
     model,
     // Глубина рассуждений: low | medium | high | xhigh | max. Ниже — быстрее и дешевле.
-    effort: env.CLAUDE_EFFORT || 'medium',
-    maxTokens: Number(env.CLAUDE_MAX_TOKENS || 16000),
+    effort: env.AGENT_EFFORT || 'medium',
+    maxTokens: Number(env.AGENT_MAX_TOKENS || 16000),
     // Agora ждёт ответ до 60 секунд: запрос к Claude должен уложиться с запасом
-    timeoutMs: Number(env.CLAUDE_TIMEOUT_MS || 50_000),
+    timeoutMs: Number(env.AGENT_TIMEOUT_MS || 50_000),
     // Если Claude отклонит задачу из соображений безопасности, API само повторит её на подходящей модели.
     // У Claude Haiku нет серверного fallback.
-    fallbacks: env.CLAUDE_FALLBACKS ? env.CLAUDE_FALLBACKS === '1' : !model.startsWith('claude-haiku'),
-    systemNotes: env.CLAUDE_SYSTEM_NOTES ? env.CLAUDE_SYSTEM_NOTES === '1' : SYSTEM_NOTE_MODELS.test(model),
+    fallbacks: env.AGENT_FALLBACKS ? env.AGENT_FALLBACKS === '1' : !model.startsWith('claude-haiku'),
+    systemNotes: env.AGENT_SYSTEM_NOTES ? env.AGENT_SYSTEM_NOTES === '1' : SYSTEM_NOTE_MODELS.test(model),
     promptPath: resolve(root, env.PROMPT_FILE || 'prompt.md'),
     knowledgeDir: resolve(root, env.KNOWLEDGE_DIR || 'knowledge'),
   };

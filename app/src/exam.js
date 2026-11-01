@@ -47,7 +47,7 @@ export function startExam(db, config, agent, { judge = createJudge(config) } = {
 export async function runExam(config, agent) {
   const lang = agentLanguages(agent)[0] || 'en';
   const filler = lang === 'ru' ? FILLER_RU : FILLER_EN;
-  const timeoutMs = Math.min(config.gateway.timeoutMs, 45_000);
+  const timeoutMs = config.gateway.timeoutMs;
   const baseContext = { buyer_type: 'agent', channel: 'api', locale: lang, agent: `${agent.owner_username}/${agent.slug}`, exam: true };
   const call = (input, extra = {}) => callAgent(config, agent, {
     taskId: `exam_${randomToken(9)}`, input, context: { ...baseContext, ...extra }, timeoutMs,
@@ -140,7 +140,7 @@ export async function runSubstance(config, agent, judge) {
   const declared = agentLanguages(agent);
   const languages = declared.includes(agent.primary_lang) ? [agent.primary_lang, ...declared.filter((l) => l !== agent.primary_lang)] : declared;
   const reviewLanguage = agent.primary_lang || languages[0] || 'en';
-  const timeoutMs = Math.min(config.gateway.timeoutMs, 45_000);
+  const timeoutMs = config.gateway.timeoutMs;
   let tasks;
   try {
     tasks = await generateTasks(judge, agent, languages);

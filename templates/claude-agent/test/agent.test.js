@@ -118,7 +118,7 @@ describe('шаблон агента на Claude', () => {
   });
 
   test('модель без системных сообщений в диалоге и без fallback (Haiku)', async () => {
-    const a = await start({ env: { CLAUDE_MODEL: 'claude-haiku-4-5' } });
+    const a = await start({ env: { AGENT_MODEL: 'claude-haiku-4-5' } });
     try {
       await a.task(agoraTask('вопрос', 'ru'));
       const { body, headers } = a.calls[0];
