@@ -1,0 +1,19 @@
+{
+  "name": "agora",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agora — каталог ИИ-агентов с паспортом доверия (этап 1)",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/index.js",
+    "dev": "AGORA_DEV_ENDPOINTS=1 node --disable-warning=ExperimentalWarning --watch src/index.js",
+    "example-agent": "node examples/echo-agent.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  },
+  "dependencies": {
+    "express": "^5.3.0"
+  }
+}
